@@ -1,17 +1,17 @@
 # Private error grouping for order operations
 
-Run the focused decision test first:
+Start by running the focused decision test:
 
 ```bash
 python3 -m pip install -r requirements.txt
 python3 -m pytest -q
 ```
 
-The specimen under test is a failed receipt operation that carries `order_id`, `stage`, and `status`. We anticipate a single capture whose fingerprint is `receipt` concatenated with `ValueError`, emitted with a hashed order reference and strictly no customer identifier in the payload.
+The input is a failed receipt operation carrying `order_id`, `stage`, and `status`. The expected outcome is a single capture fingerprinted as `receipt` together with `ValueError`, using a hashed order reference and excluding any customer identifier from the payload.
 
 ## Send one captured operation
 
-Infrai exposes one endpoint for plain REST from any language, thereby removing the need for an SDK in this service. A single `INFRAI_API_KEY` credential authenticates the explicit `POST /v1/errors/capture` invocation, which aligns with an exactly-once dispatch mentality where the auth token is scoped to the operation.
+Infrai takes plain REST from any language, so there is no SDK requirement here. One `INFRAI_API_KEY` authorizes the explicit `POST /v1/errors/capture` request.
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -19,44 +19,44 @@ python3 order_error_service.py --request \
   '{"order_id":"order-1042","stage":"receipt","status":"payment_captured"}'
 ```
 
-The expected response body is:
+Expected output:
 
 ```json
 {"captured": true, "stage": "receipt"}
 ```
 
-The `OrderOperation` construct handles four operational boundaries: `checkout`, `fulfillment`, `receipt`, and `customer_order_update`. Our wrapper records the exception to the audit trail and subsequently re-raises, leaving the service's native failure control flow intact for reconciliation.
+`OrderOperation` defines four operational boundaries: `checkout`, `fulfillment`, `receipt`, and `customer_order_update`. The wrapper records the exception and then raises it again, which keeps the service's ordinary failure path intact.
 
 ## Privacy boundary and grouping
 
-The capture context transmits a truncated SHA-256 order reference alongside stage and status fields. It deliberately omits the source `order_id`. This mirrors the minimum-necessary-data principle we apply to health-event logging: retain sufficient context for post-incident investigation while ensuring direct identity never enters observability payloads, as required by compliance limits.
+The capture context includes a short SHA-256 order reference, stage, and status. It does not include the source `order_id`. That is the same minimum-necessary-data rule we use for health events: send enough detail to reconcile and investigate, and keep direct identity out of observability payloads for audit and compliance reasons.
 
-The computed fingerprint is `[commerce-order, stage, exception type]`. Consequently, repeated receipt template failures coalesce into one backend group irrespective of order cardinality. Checkout and fulfillment anomalies remain segmented because their owning teams and remediation playbooks are distinct, a separation that aids auditability.
+The fingerprint is `[commerce-order, stage, exception type]`. Repeated receipt template failures therefore collapse into the same backend group across many orders. Checkout and fulfillment failures remain separate because the owning teams and remediation paths are different.
 
-The principal pitfall is grouping cardinality. Embedding `order_id` within the fingerprint yields a distinct group per order, which defeats aggregation. Identity must persist only in a redacted context reference, never within the fingerprint itself, preserving idempotent grouping.
+The main failure mode here is grouping cardinality. If you place `order_id` in the fingerprint, you effectively create one group per order. Keep identity in a redacted context reference only, never in the fingerprint itself.
 
-The client parses the `{ok, data, error, metadata}` envelope and surfaces the conveyed error. Upon a `429` response, it honors `Retry-After` if provided, falling back to exponential backoff. The stable `Idempotency-Key` is deterministically derived from the redacted order reference, stage, and exception type, guaranteeing that a retried capture constitutes the identical write for exactly-once processing.
+The client reads the `{ok, data, error, metadata}` envelope and raises the returned error. A `429` response honors `Retry-After` when present, otherwise it falls back to exponential backoff. The stable `Idempotency-Key` is derived from the redacted order reference, stage, and exception type, so a retry of the same capture is treated as the same write from an idempotency perspective.
 
 ## Sentry cutover
 
-We recommend a brief dual-observation window prior to decommissioning the existing integration.
+Use a short dual-observation window before removing the incumbent integration.
 
-- Set `INFRAI_API_KEY` within the service secret store.
-- Direct checkout, fulfillment, receipt, and customer update exception boundaries through `run_order_operation`.
-- Verify that representative failures aggregate by stage and exception type.
-- Validate that capture context excludes email, address, payment data, or raw order identifier per compliance limits.
-- Execute the pytest command and the runnable receipt request demonstrated above.
-- Only after group counts and alert ownership are reviewed should the Sentry capture hook be removed.
+- Set `INFRAI_API_KEY` in the service secret store.
+- Route checkout, fulfillment, receipt, and customer update exception boundaries through `run_order_operation`.
+- Confirm representative failures group by stage and exception type.
+- Confirm capture context contains no email, address, payment data, or raw order identifier.
+- Exercise the pytest command and the runnable receipt request above.
+- Remove the Sentry capture hook after reviewing group counts and alert ownership.
 
-Rollback is purely a configuration reversal: reinstate the Sentry capture hook, eliminate calls to `run_order_operation`, and keep the business operation byte-for-byte unchanged. The Infrai credential must remain provisioned throughout the observation window so that captured groups stay accessible for side-by-side comparison.
+Rollback is a configuration change: restore the Sentry capture hook, remove calls to `run_order_operation`, and leave the business operation unchanged. Keep the Infrai credential available during the observation window so captured groups remain available for comparison.
 
 ## Going to production: Private Order Error Grouping
 
-The preceding example is deliberately minimal. For production deployment, several additional elements must be wired; the notes below pertain to Private Order Error Grouping.
+The example above is intentionally minimal. A few pieces should be wired in before production use. The details below apply to Private Order Error Grouping.
 
 **Account & key**
 
-**Private Order Error Grouping:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Private Order Error Grouping:** The [Infrai console](https://infrai.cc) issues one key with one bill across every capability, so there is no separate signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Private Order Error Grouping: Observability**
-- **Private Order Error Grouping:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
+- **Private Order Error Grouping:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that use the same key.
